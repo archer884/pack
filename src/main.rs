@@ -1,6 +1,3 @@
-// For the `repeat(&' ')` I use in `main()`
-use std::iter;
-
 pub fn main() {
     // Grab the first cmd line arg as our content.
     let source: Vec<_> = match std::env::args().nth(1) {
@@ -33,12 +30,9 @@ pub fn main() {
             // as a return value.
             left_to_right = !left_to_right;
             if left_to_right {
-                // I am not clear on why exactly it was...
-                chunk.iter().chain(iter::repeat(&' ')).take(width).map(|&c| c).collect::<String>()
+                chunk.iter().take(width).map(|&c| c).collect::<String>()
             } else {
-                // ...necessary to reverse the iterator order
-                // here, but it certainly was.
-                iter::repeat(&' ').chain(chunk.iter()).rev().take(width).map(|&c| c).collect::<String>()
+                chunk.iter().rev().take(width).map(|&c| c).collect::<String>()
             }
         });
 
@@ -71,7 +65,7 @@ fn middle_factors(n: usize) -> (usize, usize) {
             .filter(|&f| n % f == 0)
             .map(|f| (f, n / f))
             .take_while(|&(a,b)| a < b)
-            .fold((0, n), |a,b| if diff(a) > diff(b) { b } else { a })
+            .fold((1, n), |a,b| if diff(a) > diff(b) { b } else { a })
     }
 }
 
