@@ -2,9 +2,12 @@
 use std::iter;
 
 pub fn main() {
+    // Grab the first cmd line arg as our content.
     let source: Vec<_> = match std::env::args().nth(1) {
-        Some(s) => s.replace("\n", "").chars().filter(|c| !c.is_whitespace()).collect(),
+        Some(s) => s.chars().filter(|c| !c.is_whitespace()).collect(),
         None => {
+            // Return early if the user screwed up.
+            // Darn that user.
             println!("Try running pack with a sentence, e.g. `pack \"<sentence>\"`");
             return;
         },
@@ -25,10 +28,16 @@ pub fn main() {
     // a prime length.
     let rows = source.chunks(width)
         .map(|chunk| {
+            // This is why l2r started off backwards--so I 
+            // could flip it before the if expression I use
+            // as a return value.
             left_to_right = !left_to_right;
             if left_to_right {
+                // I am not clear on why exactly it was...
                 chunk.iter().chain(iter::repeat(&' ')).take(width).map(|&c| c).collect::<String>()
             } else {
+                // ...necessary to reverse the iterator order
+                // here, but it certainly was.
                 iter::repeat(&' ').chain(chunk.iter()).rev().take(width).map(|&c| c).collect::<String>()
             }
         });
@@ -52,6 +61,10 @@ pub fn main() {
 fn middle_factors(n: usize) -> (usize, usize) {
     let root = (n as f64).sqrt();
 
+    // This expression creates an iterator of factor-pairs
+    // (e.g. (3,4) for 12) and folds over them, returning
+    // the pair exhibiting the least absolute difference 
+    // between the first and second value.
     match root == root.floor() {
         true => (root as usize, root as usize),
         false => (2..n)
@@ -66,6 +79,11 @@ fn middle_factors(n: usize) -> (usize, usize) {
 ///
 /// > Note: will panic with an arithmetic overflow if
 /// > values.0 is larger than values.1
+///
+/// An earlier version of this function allowed for values to appear in any 
+/// order by subtracting `min(values)` from `max(values)`, but when I realized
+/// I could guarantee their relative sizes using the filter in `middle_factors()`,
+/// I removed that code.
 #[inline(always)]
 fn diff(values: (usize, usize)) -> usize {
     values.1 - values.0
@@ -73,6 +91,9 @@ fn diff(values: (usize, usize)) -> usize {
 
 #[cfg(test)]
 mod test {
+    //! These tests simply establish that the `middle_factors()` function in the 
+    //! main crate actually works.
+    
     #[test]
     fn mf_12_is_4() {
         assert!((3, 4) == super::middle_factors(12));
