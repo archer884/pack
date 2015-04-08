@@ -47,11 +47,9 @@ pub fn main() {
 
 /// Returns the "middle-iest" factors for a value.
 ///
-/// Like, say, an input value of 12 or 16 should return a value of four. The 
-/// idea being to choose a factor that can be multiplied with another factor 
-/// near itself (including, possibly, itself) to get the result value.
+/// For example, for 12, this function will return (3, 4).
 ///
-/// For any two possible middle factors, we favor the larger.
+/// The smaller of the two factors will always appear on the left.
 fn middle_factors(n: usize) -> (usize, usize) {
     let root = (n as f64).sqrt();
 
