@@ -24,7 +24,7 @@ struct Args {
 }
 
 impl Args {
-    fn try_get_dir<'a>(&self) -> Option<&'_ Path> {
+    fn try_get_dir(&self) -> Option<&'_ Path> {
         if self.paths.len() == 1 {
             let path = Path::new(&self.paths[0]);
             if path.is_dir() {
@@ -41,7 +41,7 @@ impl Args {
         candidates.filter_map(|x| {
             let candidate = Path::new(x);
             if candidate.is_file() {
-                return Some(candidate.into());
+                Some(candidate.into())
             } else {
                 None
             }
