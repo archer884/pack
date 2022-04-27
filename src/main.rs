@@ -97,9 +97,7 @@ fn main() {
 
 fn run(args: &Args) -> anyhow::Result<()> {
     // See, this is where the fun starts...
-    // Also, not using manifest_parent_path for now because I'm not saving
-    // the manifest on the sending side.
-    let (_manifest_parent_path, paths) = match args.try_get_dir() {
+    let (manifest_parent_path, paths) = match args.try_get_dir() {
         Some(dir) => (Cow::from(dir), Either::Left(read_dir(dir)?)),
         None => (std::env::current_dir()?.into(), Either::Right(args.paths())),
     };
@@ -126,8 +124,8 @@ fn run(args: &Args) -> anyhow::Result<()> {
         println!("{}", target.display());
     }
 
-    let mut writer = File::create(Path::new(&args.target).join("manifest.json"))?;
-    serde_json::to_writer_pretty(&mut writer, &manifest)?;
+    serde_json::to_writer_pretty(&mut File::create(manifest_parent_path.join("manifest.json"))?, &manifest)?;
+    serde_json::to_writer_pretty(&mut File::create(Path::new(&args.target).join("manifest.json"))?, &manifest)?;
 
     Ok(())
 }
