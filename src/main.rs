@@ -140,7 +140,9 @@ fn run(args: &Args) -> anyhow::Result<()> {
         io::copy(&mut reader, &mut writer)?;
 
         if !args.quiet {
-            println!("{}", target.display());
+            // FIXME: We already did this once, but I guess we're doing it again.
+            let name = target.strip_prefix(&args.target)?;
+            println!("{}", name.display());
         }
     }
 
