@@ -1,8 +1,9 @@
 use std::{
     borrow::Cow,
-    fs::{self, File},
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
     io,
-    path::{Path, PathBuf}, collections::HashSet,
+    path::{Path, PathBuf},
 };
 
 use blake3::Hasher;
@@ -19,8 +20,17 @@ struct Args {
     /// If a directory is passed here, all files in that directory will be copied.
     #[clap(required = true)]
     paths: Vec<String>,
-    ///
+
+    /// path to which files will be copied
     target: String,
+
+    /// quiet mode
+    #[clap(short, long)]
+    quiet: bool,
+
+    /// overwrite existing files
+    #[clap(short, long)]
+    force: bool,
 }
 
 impl Args {
@@ -36,9 +46,7 @@ impl Args {
     }
 
     fn paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
-        let candidates = self.paths.iter();
-
-        candidates.filter_map(|x| {
+        self.paths.iter().filter_map(|x| {
             let candidate = Path::new(x);
             if candidate.is_file() {
                 Some(candidate.into())
@@ -57,12 +65,25 @@ struct Manifest {
 
 impl Manifest {
     fn push(&mut self, path: &Path) -> io::Result<()> {
+        let name = path
+            .file_name()
+            // Commented line uses unstable feature
+            // see issue #86442 <https://github.com/rust-lang/rust/issues/86442> for more information
+            // Note: these morons need to hurry up and stabilize this, because it's getting annoying.
+            // .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidFilename, "path must be a file"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "path must be a file"))?
+            .into();
+
         let mut reader = File::open(path)?;
         let mut hasher = Hasher::new();
         io::copy(&mut reader, &mut hasher)?;
-        self.items
-            .insert(path.file_name().expect("argument must be a file").into(), hasher.finalize().to_string());
+        self.items.insert(name, hasher.finalize().to_string());
         Ok(())
+    }
+
+    fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let mut file = File::create(path)?;
+        Ok(serde_json::to_writer_pretty(&mut file, self)?)
     }
 }
 
@@ -81,7 +102,7 @@ impl CaseInsensitiveFilter {
             .copied()
             .map(|u| u.to_ascii_uppercase())
             .collect();
-        
+
         self.set.insert(value)
     }
 }
@@ -109,23 +130,22 @@ fn run(args: &Args) -> anyhow::Result<()> {
         if !filter.validate(&path) {
             continue;
         }
-        
+
         manifest.push(&path)?;
 
         let target = make_target_path(args.target.as_ref(), &path);
         let mut reader = File::open(&path)?;
-        let mut writer = File::create(&target)?;
-        // let mut writer = OpenOptions::new()
-        //     .create_new(true)
-        //     .write(true)
-        //     .open(&target)?;
+        let mut writer = create_target_file(&target, args)?;
 
         io::copy(&mut reader, &mut writer)?;
-        println!("{}", target.display());
+
+        if !args.quiet {
+            println!("{}", target.display());
+        }
     }
 
-    serde_json::to_writer_pretty(&mut File::create(manifest_parent_path.join("manifest.json"))?, &manifest)?;
-    serde_json::to_writer_pretty(&mut File::create(Path::new(&args.target).join("manifest.json"))?, &manifest)?;
+    manifest.write(manifest_parent_path.join("manifest.json"))?;
+    manifest.write(Path::new(&args.target).join("manifest.json"))?;
 
     Ok(())
 }
@@ -143,4 +163,12 @@ fn read_dir(path: &Path) -> io::Result<impl Iterator<Item = PathBuf>> {
 
 fn make_target_path(target: &Path, path: &Path) -> PathBuf {
     target.join(path.file_name().expect("argument must be a file"))
+}
+
+fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
+    if args.force {
+        File::create(&path)
+    } else {
+        OpenOptions::new().create_new(true).write(true).open(&path)
+    }
 }
