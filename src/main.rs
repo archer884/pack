@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io,
     path::{Path, PathBuf}, collections::HashSet,
 };
@@ -61,7 +61,7 @@ impl Manifest {
         let mut hasher = Hasher::new();
         io::copy(&mut reader, &mut hasher)?;
         self.items
-            .insert(path.into(), hasher.finalize().to_string());
+            .insert(path.file_name().expect("argument must be a file").into(), hasher.finalize().to_string());
         Ok(())
     }
 }
@@ -97,7 +97,9 @@ fn main() {
 
 fn run(args: &Args) -> anyhow::Result<()> {
     // See, this is where the fun starts...
-    let (manifest_parent_path, paths) = match args.try_get_dir() {
+    // Also, not using manifest_parent_path for now because I'm not saving
+    // the manifest on the sending side.
+    let (_manifest_parent_path, paths) = match args.try_get_dir() {
         Some(dir) => (Cow::from(dir), Either::Left(read_dir(dir)?)),
         None => (std::env::current_dir()?.into(), Either::Right(args.paths())),
     };
@@ -114,16 +116,17 @@ fn run(args: &Args) -> anyhow::Result<()> {
 
         let target = make_target_path(args.target.as_ref(), &path);
         let mut reader = File::open(&path)?;
-        let mut writer = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&target)?;
+        let mut writer = File::create(&target)?;
+        // let mut writer = OpenOptions::new()
+        //     .create_new(true)
+        //     .write(true)
+        //     .open(&target)?;
 
         io::copy(&mut reader, &mut writer)?;
         println!("{}", target.display());
     }
 
-    let mut writer = File::create(manifest_parent_path.join("manifest.json"))?;
+    let mut writer = File::create(Path::new(&args.target).join("manifest.json"))?;
     serde_json::to_writer_pretty(&mut writer, &manifest)?;
 
     Ok(())
