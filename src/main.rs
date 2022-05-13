@@ -3,6 +3,7 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io,
+    os::unix::prelude::OsStrExt,
     path::{Path, PathBuf},
 };
 
@@ -107,6 +108,41 @@ impl CaseInsensitiveFilter {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq)]
+struct CaseInsensitiveCmp<'a>(&'a [u8]);
+
+impl PartialEq for CaseInsensitiveCmp<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialOrd for CaseInsensitiveCmp<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.0.cmp(&other.0))
+    }
+}
+
+impl Ord for CaseInsensitiveCmp<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare as far as we're able
+        let comparisons = self.0.iter().cloned().zip(other.0.iter().cloned());
+        for (left, right) in comparisons {
+            let left = left.to_ascii_uppercase();
+            let right = right.to_ascii_uppercase();
+
+            match left.cmp(&right) {
+                std::cmp::Ordering::Equal => continue,
+                result => return result,
+            }
+        }
+
+        // We have now run out of letters on one side or the other. The longer string
+        // is the loser.
+        self.0.len().cmp(&other.0.len())
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -122,6 +158,12 @@ fn run(args: &Args) -> anyhow::Result<()> {
         Some(dir) => (Cow::from(dir), Either::Left(read_dir(dir)?)),
         None => (std::env::current_dir()?.into(), Either::Right(args.paths())),
     };
+
+    let mut paths: Vec<_> = paths.collect();
+    paths.sort_unstable_by(|a, b| {
+        CaseInsensitiveCmp(a.as_os_str().as_bytes())
+            .cmp(&CaseInsensitiveCmp(b.as_os_str().as_bytes()))
+    });
 
     let mut filter = CaseInsensitiveFilter::default();
     let mut manifest = Manifest::default();
