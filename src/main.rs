@@ -15,6 +15,7 @@ use serde::Serialize;
 use unicase::UniCase;
 
 #[derive(Clone, Debug, Parser)]
+#[clap(version)]
 struct Args {
     /// path or paths to be copied
     ///
