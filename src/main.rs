@@ -3,16 +3,16 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io,
-    os::unix::prelude::OsStrExt,
     path::{Path, PathBuf},
 };
 
 use blake3::Hasher;
+use bumpalo::Bump;
 use clap::Parser;
 use either::Either;
 use indexmap::IndexMap;
-use os_str_bytes::OsStrBytes;
 use serde::Serialize;
+use unicase::UniCase;
 
 #[derive(Clone, Debug, Parser)]
 struct Args {
@@ -88,61 +88,6 @@ impl Manifest {
     }
 }
 
-#[derive(Clone, Default)]
-struct CaseInsensitiveFilter {
-    set: HashSet<Vec<u8>>,
-}
-
-impl CaseInsensitiveFilter {
-    /// Validate a path
-    fn validate(&mut self, path: &Path) -> bool {
-        let value: Vec<_> = path
-            .as_os_str()
-            .to_raw_bytes()
-            .iter()
-            .copied()
-            .map(|u| u.to_ascii_uppercase())
-            .collect();
-
-        self.set.insert(value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq)]
-struct CaseInsensitiveCmp<'a>(&'a [u8]);
-
-impl PartialEq for CaseInsensitiveCmp<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl PartialOrd for CaseInsensitiveCmp<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.cmp(&other.0))
-    }
-}
-
-impl Ord for CaseInsensitiveCmp<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare as far as we're able
-        let comparisons = self.0.iter().cloned().zip(other.0.iter().cloned());
-        for (left, right) in comparisons {
-            let left = left.to_ascii_uppercase();
-            let right = right.to_ascii_uppercase();
-
-            match left.cmp(&right) {
-                std::cmp::Ordering::Equal => continue,
-                result => return result,
-            }
-        }
-
-        // We have now run out of letters on one side or the other. The longer string
-        // is the loser.
-        self.0.len().cmp(&other.0.len())
-    }
-}
-
 fn main() {
     let args = Args::parse();
 
@@ -159,23 +104,47 @@ fn run(args: &Args) -> anyhow::Result<()> {
         None => (std::env::current_dir()?.into(), Either::Right(args.paths())),
     };
 
+    // Sorting paths is non fucking trivial, because the best way to sort paths has absolutely
+    // nothing to do with the default cmp implementation on either String or PathBuf or *whatever.*
+    // The reality is that no one in their right mind wants A and a to appear so far from one
+    // another in any list of items, so fuck that. I'm trying to use unicase to perform a case
+    // insensitive comparison, because I'm sick and tired of rewriting my own case insensitizer
+    // every time I come to party (and I ALWAYS come to party), but I have no idea what its
+    // constructor does and it's actually pretty expensive to make one out of a path because I need
+    // to convert to a UTF8 string first (which is PROBABLY a noop, but whatever)...
+
+    // This is a big problem because I can't just cache the damn things. They only borrow data and
+    // I can't keep it around because of the semantics of sort_by_cached_key() unless it's stored
+    // somewhere else--and the fact that it's stored on the vector itself is worthless because the
+    // vector is being sorted, so all the references are about to be invalidated! Which means I
+    // have only one solution left to fall back on.
+
+    // Prepare yourself.
+
+    let scratch = Bump::new();
     let mut paths: Vec<_> = paths.collect();
-    paths.sort_unstable_by(|a, b| {
-        CaseInsensitiveCmp(a.as_os_str().as_bytes())
-            .cmp(&CaseInsensitiveCmp(b.as_os_str().as_bytes()))
+
+    // Fuck your lifetime.
+
+    paths.sort_by_cached_key(|path| {
+        let s = scratch.alloc_str(&*path.as_os_str().to_string_lossy());
+        UniCase::new(s)
     });
 
-    let mut filter = CaseInsensitiveFilter::default();
+    // Thankfully, it's a lot easier to pull this same trick with the case insensitive filter now that
+    // all these paths are owned by something stable.
+
+    let mut filter = HashSet::new();
     let mut manifest = Manifest::default();
 
-    for path in paths {
-        if !filter.validate(&path) {
+    for path in &paths {
+        if !filter.insert(UniCase::new(path.as_os_str().to_string_lossy())) {
             continue;
         }
 
-        manifest.push(&path)?;
+        manifest.push(path)?;
 
-        let target = make_target_path(args.target.as_ref(), &path);
+        let target = make_target_path(args.target.as_ref(), path);
         let mut reader = File::open(&path)?;
         let mut writer = create_target_file(&target, args)?;
 
