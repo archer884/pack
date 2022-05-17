@@ -228,5 +228,5 @@ fn clean_files(path: &Path) -> anyhow::Result<()> {
         .items
         .keys()
         .map(|path| base_path.join(path))
-        .try_for_each(|path| fs::remove_file(path))?)
+        .try_for_each(fs::remove_file)?)
 }
