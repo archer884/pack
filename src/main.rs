@@ -24,7 +24,8 @@ struct Args {
     paths: Vec<String>,
 
     /// path to which files will be copied
-    target: String,
+    #[clap(required = true)]
+    target: Option<String>,
 
     /// quiet mode
     #[clap(short, long)]
@@ -64,6 +65,11 @@ impl Args {
                 None
             }
         })
+    }
+
+    fn target(&self) -> &str {
+        // Don't ask.
+        self.target.as_deref().unwrap()
     }
 }
 
@@ -157,7 +163,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
 
         manifest.push(path)?;
 
-        let target = make_target_path(args.target.as_ref(), path);
+        let target = make_target_path(args.target().as_ref(), path);
         let mut reader = File::open(&path)?;
         let mut writer = create_target_file(&target, args)?;
 
@@ -165,13 +171,13 @@ fn run(args: &Args) -> anyhow::Result<()> {
 
         if !args.quiet {
             // FIXME: We already did this once, but I guess we're doing it again.
-            let name = target.strip_prefix(&args.target)?;
+            let name = target.strip_prefix(&args.target())?;
             println!("{}", name.display());
         }
     }
 
     manifest.write(manifest_parent_path.join("manifest.json"))?;
-    manifest.write(Path::new(&args.target).join("manifest.json"))?;
+    manifest.write(Path::new(args.target()).join("manifest.json"))?;
 
     Ok(())
 }
