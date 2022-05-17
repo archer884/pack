@@ -9,11 +9,11 @@ edition = "2021"
 anyhow = "1.0.57"
 blake3 = "1.3.1"
 bumpalo = "3.9.1"
-clap = { version = "3.1.12", features = ["derive"] }
+clap = { version = "3.1.18", features = ["derive"] }
 either = "1.6.1"
 globwalk = "0.8.1"
 indexmap = { version = "1.8.1", features = ["serde"] }
-os_str_bytes = "6.0.0"
-serde = { version = "1.0.136", features = ["derive"] }
-serde_json = "1.0.79"
+os_str_bytes = "6.0.1"
+serde = { version = "1.0.137", features = ["derive"] }
+serde_json = "1.0.81"
 unicase = "2.6.0"
