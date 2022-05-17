@@ -11,6 +11,7 @@ use bumpalo::Bump;
 use clap::{Parser, Subcommand};
 use either::Either;
 use indexmap::IndexMap;
+use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use unicase::UniCase;
 
@@ -41,6 +42,7 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    Check { path: Option<String> },
     Clean { path: Option<String> },
 }
 
@@ -90,17 +92,30 @@ impl Manifest {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "path must be a file"))?
             .into();
 
-        let mut reader = File::open(path)?;
-        let mut hasher = Hasher::new();
-        io::copy(&mut reader, &mut hasher)?;
-        self.items.insert(name, hasher.finalize().to_string());
+        self.items.insert(name, get_hash(path)?);
         Ok(())
+    }
+
+    fn reconstruct_paths<'a>(
+        &'a self,
+        parent: impl AsRef<Path> + 'a,
+    ) -> impl Iterator<Item = PathBuf> + 'a {
+        self.items
+            .keys()
+            .map(move |path| parent.as_ref().join(path))
     }
 
     fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let mut file = File::create(path)?;
         Ok(serde_json::to_writer_pretty(&mut file, self)?)
     }
+}
+
+fn get_hash(path: impl AsRef<Path>) -> io::Result<String> {
+    let mut reader = File::open(path)?;
+    let mut hasher = Hasher::new();
+    io::copy(&mut reader, &mut hasher)?;
+    Ok(hasher.finalize().to_string())
 }
 
 fn main() {
@@ -207,26 +222,65 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
 
 fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
     match command {
-        Command::Clean { path } => {
-            let path = path
-                .as_ref()
-                .map(|path| Ok(path.into()))
-                .unwrap_or_else(|| std::env::current_dir().map(|dir| dir.join("manifest.json")))?;
-            clean_files(&path)
-        }
+        Command::Clean { path } => clean_files(&build_manifest_path(path)?),
+        Command::Check { path } => check_files(&build_manifest_path(path)?),
     }
 }
 
-fn clean_files(path: &Path) -> anyhow::Result<()> {
-    let text = fs::read_to_string(&path)?;
-    let manifest: Manifest = serde_json::from_str(&text)?;
-    let base_path = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent dir does not exist"))?;
+fn build_manifest_path(path: &Option<String>) -> Result<PathBuf, anyhow::Error> {
+    Ok(path
+        .as_ref()
+        .map(|path| Ok(path.into()))
+        .unwrap_or_else(|| std::env::current_dir().map(|dir| dir.join("manifest.json")))?)
+}
 
-    Ok(manifest
-        .items
-        .keys()
-        .map(|path| base_path.join(path))
-        .try_for_each(fs::remove_file)?)
+fn clean_files(path: &Path) -> anyhow::Result<()> {
+    let base_path = get_base_path(path)?;
+    let manifest = load_manifest(path)?;
+    manifest
+        .reconstruct_paths(&base_path)
+        .try_for_each(fs::remove_file)?;
+    Ok(fs::remove_file(path)?)
+}
+
+fn check_files(path: &Path) -> anyhow::Result<()> {
+    let base_path = get_base_path(path)?;
+    let manifest = load_manifest(path)?;
+
+    let mut has_error = false;
+
+    for (file_name, hash) in &manifest.items {
+        let reconstructed_path = base_path.join(file_name);
+        if !reconstructed_path.exists() {
+            let missing = "missing".yellow();
+            let file_name = file_name.display();
+            eprintln!("{missing} {file_name}");
+            has_error = true;
+        }
+
+        let reconstructed_hash = get_hash(&reconstructed_path)?;
+        if &*reconstructed_hash != hash {
+            let mismatch = "mismatch".red();
+            let file_name = file_name.display();
+            eprintln!("{mismatch} {file_name}");
+            has_error = true;
+        }
+    }
+
+    if has_error {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn load_manifest(path: &Path) -> io::Result<Manifest> {
+    let text = fs::read_to_string(path)?;
+    let manifest: Manifest = serde_json::from_str(&text)?;
+    Ok(manifest)
+}
+
+fn get_base_path(path: &Path) -> io::Result<&Path> {
+    path.parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent dir does not exist"))
 }
