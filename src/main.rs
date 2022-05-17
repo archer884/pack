@@ -42,7 +42,13 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    /// check files (on the receiving side)
     Check { path: Option<String> },
+    /// remove files
+    /// 
+    /// This removes the files found in a manifest file before removing the manifest file itself.
+    /// For obvious reasons, you'd only wanna do this on the sending side. I mean, that's obvious,
+    /// right? ...right?
     Clean { path: Option<String> },
 }
 
