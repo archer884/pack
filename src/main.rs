@@ -8,14 +8,14 @@ use std::{
 
 use blake3::Hasher;
 use bumpalo::Bump;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use either::Either;
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use unicase::UniCase;
 
 #[derive(Clone, Debug, Parser)]
-#[clap(version)]
+#[clap(version, subcommand_negates_reqs(true))]
 struct Args {
     /// path or paths to be copied
     ///
@@ -33,6 +33,14 @@ struct Args {
     /// overwrite existing files
     #[clap(short, long)]
     force: bool,
+
+    #[clap(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum Command {
+    Clean { path: Option<String> },
 }
 
 impl Args {
@@ -59,7 +67,7 @@ impl Args {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(transparent)]
 struct Manifest {
     items: IndexMap<PathBuf, String>,
@@ -99,6 +107,10 @@ fn main() {
 }
 
 fn run(args: &Args) -> anyhow::Result<()> {
+    if let Some(command) = &args.command {
+        return execute_subcommand(command);
+    }
+
     // See, this is where the fun starts...
     let (manifest_parent_path, paths) = match args.try_get_dir() {
         Some(dir) => (Cow::from(dir), Either::Left(read_dir(dir)?)),
@@ -185,4 +197,30 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
     } else {
         OpenOptions::new().create_new(true).write(true).open(&path)
     }
+}
+
+fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
+    match command {
+        Command::Clean { path } => {
+            let path = path
+                .as_ref()
+                .map(|path| Ok(path.into()))
+                .unwrap_or_else(|| std::env::current_dir())?;
+            clean_files(&path)
+        }
+    }
+}
+
+fn clean_files(path: &Path) -> anyhow::Result<()> {
+    let text = fs::read_to_string(&path)?;
+    let manifest: Manifest = serde_json::from_str(&text)?;
+    let base_path = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent dir does not exist"))?;
+
+    Ok(manifest
+        .items
+        .keys()
+        .map(|path| base_path.join(path))
+        .try_for_each(|path| fs::remove_file(path))?)
 }
