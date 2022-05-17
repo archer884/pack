@@ -211,7 +211,7 @@ fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
             let path = path
                 .as_ref()
                 .map(|path| Ok(path.into()))
-                .unwrap_or_else(|| std::env::current_dir())?;
+                .unwrap_or_else(|| std::env::current_dir().map(|dir| dir.join("manifest.json")))?;
             clean_files(&path)
         }
     }
