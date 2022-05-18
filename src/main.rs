@@ -275,6 +275,9 @@ fn check_files(path: &Path) -> anyhow::Result<()> {
 
     if has_error {
         std::process::exit(1);
+    } else {
+        println!("{}", "Ok".green());
+        fs::remove_file(path)?;
     }
 
     Ok(())
