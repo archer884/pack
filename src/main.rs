@@ -45,7 +45,7 @@ enum Command {
     /// check files (on the receiving side)
     Check { path: Option<String> },
     /// remove files
-    /// 
+    ///
     /// This removes the files found in a manifest file before removing the manifest file itself.
     /// For obvious reasons, you'd only wanna do this on the sending side. I mean, that's obvious,
     /// right? ...right?
@@ -234,10 +234,17 @@ fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
 }
 
 fn build_manifest_path(path: &Option<String>) -> Result<PathBuf, anyhow::Error> {
-    Ok(path
-        .as_ref()
-        .map(|path| Ok(path.into()))
-        .unwrap_or_else(|| std::env::current_dir().map(|dir| dir.join("manifest.json")))?)
+    static DEFAULT_MANIFEST_FILENAME: &str = "manifest.json";
+    match path {
+        Some(path) => {
+            let mut path: PathBuf = path.into();
+            if path.is_dir() {
+                path.push(DEFAULT_MANIFEST_FILENAME);
+            }
+            Ok(path)
+        }
+        None => Ok(std::env::current_dir()?.join(DEFAULT_MANIFEST_FILENAME)),
+    }
 }
 
 fn clean_files(path: &Path) -> anyhow::Result<()> {
