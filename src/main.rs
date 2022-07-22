@@ -257,6 +257,11 @@ fn clean_files(path: &Path) -> anyhow::Result<()> {
 }
 
 fn check_files(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        println!("manifest not found");
+        return Ok(())
+    }
+    
     let base_path = get_base_path(path)?;
     let manifest = load_manifest(path)?;
 
