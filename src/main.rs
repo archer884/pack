@@ -125,9 +125,7 @@ fn get_hash(path: impl AsRef<Path>) -> io::Result<String> {
 }
 
 fn main() {
-    let args = Args::parse();
-
-    if let Err(e) = run(&args) {
+    if let Err(e) = run(&Args::parse()) {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -171,20 +169,43 @@ fn run(args: &Args) -> anyhow::Result<()> {
         UniCase::new(s)
     });
 
-    // Thankfully, it's a lot easier to pull this same trick with the case insensitive filter now that
+    // Before we actually start this whole big long process, I actually want to check to see if
+    // there are any path conflicts. We also need to see whether or not there's a manifest file on
+    // the receiving end. Let's just do that now.
+
+    let foreign_paths: Vec<_> = paths
+        .iter()
+        .map(|path| make_target_path(args.target().as_ref(), path))
+        .collect();
+
+    let foreign_manifest = Path::new(args.target()).join("manifest.json");
+
+    // So, if any of that stuff exists, we let the user know and bail. Unless, of course, we
+    // force, of course....
+
+    if !args.force && foreign_manifest.exists() {
+        return Err(anyhow::anyhow!("found manifest in target location"));
+    }
+
+    if !args.force && foreign_paths.iter().any(|path| path.exists()) {
+        return Err(anyhow::anyhow!("file conflict in target location"));
+    }
+
+    // Thankfully, it's a lot easier to pull this trick with the case insensitive filter now that
     // all these paths are owned by something stable.
 
     let mut filter = HashSet::new();
     let mut manifest = Manifest::default();
 
-    for path in &paths {
+    let pairs = paths.iter().zip(foreign_paths.iter());
+
+    for (path, target) in pairs {
         if !filter.insert(UniCase::new(path.as_os_str().to_string_lossy())) {
             continue;
         }
 
         manifest.push(path)?;
 
-        let target = make_target_path(args.target().as_ref(), path);
         let mut reader = File::open(&path)?;
         let mut writer = create_target_file(&target, args)?;
 
@@ -198,7 +219,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     }
 
     manifest.write(manifest_parent_path.join("manifest.json"))?;
-    manifest.write(Path::new(args.target()).join("manifest.json"))?;
+    manifest.write(foreign_manifest)?;
 
     Ok(())
 }
@@ -259,9 +280,9 @@ fn clean_files(path: &Path) -> anyhow::Result<()> {
 fn check_files(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         println!("manifest not found");
-        return Ok(())
+        return Ok(());
     }
-    
+
     let base_path = get_base_path(path)?;
     let manifest = load_manifest(path)?;
 
