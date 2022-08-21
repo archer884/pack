@@ -273,8 +273,18 @@ fn clean_files(path: &Path) -> anyhow::Result<()> {
     let manifest = load_manifest(path)?;
     manifest
         .reconstruct_paths(&base_path)
-        .try_for_each(fs::remove_file)?;
+        .try_for_each(remove_or_warn)?;
     Ok(fs::remove_file(path)?)
+}
+
+fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    if !path.exists() {
+        eprintln!("{} {}", "file not found:".yellow(), path.display());
+        return Ok(());
+    }
+
+    fs::remove_file(path)
 }
 
 fn check_files(path: &Path) -> anyhow::Result<()> {
