@@ -1,6 +1,8 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
+    env,
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
@@ -13,6 +15,7 @@ use either::Either;
 use indexmap::IndexMap;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
+use sha1_smol::Sha1;
 use unicase::UniCase;
 
 #[derive(Clone, Debug, Parser)]
@@ -111,6 +114,14 @@ impl Manifest {
             .map(move |path| parent.as_ref().join(path))
     }
 
+    fn metahash(&self) -> String {
+        let mut hasher = Sha1::new();
+        for (_, hash) in &self.items {
+            hasher.update(hash.as_bytes());
+        }
+        hasher.digest().to_string()
+    }
+
     fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let mut file = File::create(path)?;
         Ok(serde_json::to_writer_pretty(&mut file, self)?)
@@ -137,6 +148,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     }
 
     // See, this is where the fun starts...
+
     let (manifest_parent_path, paths) = match args.try_get_dir() {
         Some(dir) => (Cow::from(dir), Either::Left(read_dir(dir)?)),
         None => (std::env::current_dir()?.into(), Either::Right(args.paths())),
@@ -178,14 +190,8 @@ fn run(args: &Args) -> anyhow::Result<()> {
         .map(|path| make_target_path(args.target().as_ref(), path))
         .collect();
 
-    let foreign_manifest = Path::new(args.target()).join("manifest.json");
-
     // So, if any of that stuff exists, we let the user know and bail. Unless, of course, we
     // force, of course....
-
-    if !args.force && foreign_manifest.exists() {
-        return Err(anyhow::anyhow!("found manifest in target location"));
-    }
 
     if !args.force && foreign_paths.iter().any(|path| path.exists()) {
         return Err(anyhow::anyhow!("file conflict in target location"));
@@ -207,7 +213,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
         manifest.push(path)?;
 
         let mut reader = File::open(&path)?;
-        let mut writer = create_target_file(&target, args)?;
+        let mut writer = create_target_file(target, args)?;
 
         io::copy(&mut reader, &mut writer)?;
 
@@ -218,7 +224,10 @@ fn run(args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    manifest.write(manifest_parent_path.join("manifest.json"))?;
+    let manifest_name = manifest.metahash() + ".json";
+    let foreign_manifest = Path::new(args.target()).join(&manifest_name);
+
+    manifest.write(manifest_parent_path.join(&manifest_name))?;
     manifest.write(foreign_manifest)?;
 
     Ok(())
@@ -249,32 +258,48 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
 
 fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
     match command {
-        Command::Clean { path } => clean_files(&build_manifest_path(path)?),
-        Command::Check { path } => check_files(&build_manifest_path(path)?),
-    }
-}
-
-fn build_manifest_path(path: &Option<String>) -> Result<PathBuf, anyhow::Error> {
-    static DEFAULT_MANIFEST_FILENAME: &str = "manifest.json";
-    match path {
-        Some(path) => {
-            let mut path: PathBuf = path.into();
-            if path.is_dir() {
-                path.push(DEFAULT_MANIFEST_FILENAME);
-            }
-            Ok(path)
+        Command::Clean { path } => {
+            let path = get_root_path(path);
+            clean_files(&path, get_manifest_paths(&path)?)
         }
-        None => Ok(std::env::current_dir()?.join(DEFAULT_MANIFEST_FILENAME)),
+
+        Command::Check { path } => {
+            let path = get_root_path(path);
+            check_files(&path, get_manifest_paths(&path)?)
+        }
     }
 }
 
-fn clean_files(path: &Path) -> anyhow::Result<()> {
-    let base_path = get_base_path(path)?;
-    let manifest = load_manifest(path)?;
-    manifest
-        .reconstruct_paths(&base_path)
-        .try_for_each(remove_or_warn)?;
-    Ok(fs::remove_file(path)?)
+fn get_manifest_paths(path: &Path) -> io::Result<impl Iterator<Item = PathBuf>> {
+    let expected_extension = OsStr::new("manifest");
+    Ok(fs::read_dir(path)?.filter_map(move |entry| {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        let extension = path.extension()?;
+        (path.is_file() && extension == expected_extension).then_some(path)
+    }))
+}
+
+fn get_root_path(maybe: &Option<String>) -> Cow<Path> {
+    maybe
+        .as_deref()
+        .map(|path| Cow::Borrowed(Path::new(path)))
+        .unwrap_or_else(|| Cow::Owned(env::current_dir().unwrap()))
+}
+
+fn clean_files(
+    root: &Path,
+    manifest_paths: impl IntoIterator<Item = PathBuf>,
+) -> anyhow::Result<()> {
+    for manifest_path in manifest_paths {
+        let manifest = load_manifest(&manifest_path)?;
+        manifest
+            .reconstruct_paths(&root)
+            .try_for_each(remove_or_warn)?;
+        fs::remove_file(&manifest_path)?;
+    }
+
+    Ok(())
 }
 
 fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
@@ -287,40 +312,39 @@ fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-fn check_files(path: &Path) -> anyhow::Result<()> {
-    if !path.exists() {
-        println!("manifest not found");
-        return Ok(());
-    }
+fn check_files(
+    root: &Path,
+    manifest_paths: impl IntoIterator<Item = PathBuf>,
+) -> anyhow::Result<()> {
+    for manifest_path in manifest_paths {
+        let manifest = load_manifest(&manifest_path)?;
 
-    let base_path = get_base_path(path)?;
-    let manifest = load_manifest(path)?;
+        let mut has_error = false;
 
-    let mut has_error = false;
+        for (file_name, hash) in &manifest.items {
+            let reconstructed_path = root.join(file_name);
+            if !reconstructed_path.exists() {
+                let missing = "missing".yellow();
+                let file_name = file_name.display();
+                eprintln!("{missing} {file_name}");
+                has_error = true;
+            }
 
-    for (file_name, hash) in &manifest.items {
-        let reconstructed_path = base_path.join(file_name);
-        if !reconstructed_path.exists() {
-            let missing = "missing".yellow();
-            let file_name = file_name.display();
-            eprintln!("{missing} {file_name}");
-            has_error = true;
+            let reconstructed_hash = get_hash(&reconstructed_path)?;
+            if &*reconstructed_hash != hash {
+                let mismatch = "mismatch".red();
+                let file_name = file_name.display();
+                eprintln!("{mismatch} {file_name}");
+                has_error = true;
+            }
         }
 
-        let reconstructed_hash = get_hash(&reconstructed_path)?;
-        if &*reconstructed_hash != hash {
-            let mismatch = "mismatch".red();
-            let file_name = file_name.display();
-            eprintln!("{mismatch} {file_name}");
-            has_error = true;
+        if has_error {
+            std::process::exit(1);
+        } else {
+            println!("{}", "Ok".green());
+            fs::remove_file(manifest_path)?;
         }
-    }
-
-    if has_error {
-        std::process::exit(1);
-    } else {
-        println!("{}", "Ok".green());
-        fs::remove_file(path)?;
     }
 
     Ok(())
@@ -328,11 +352,5 @@ fn check_files(path: &Path) -> anyhow::Result<()> {
 
 fn load_manifest(path: &Path) -> io::Result<Manifest> {
     let text = fs::read_to_string(path)?;
-    let manifest: Manifest = serde_json::from_str(&text)?;
-    Ok(manifest)
-}
-
-fn get_base_path(path: &Path) -> io::Result<&Path> {
-    path.parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent dir does not exist"))
+    Ok(serde_json::from_str(&text)?)
 }
