@@ -224,7 +224,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    let manifest_name = manifest.metahash() + ".json";
+    let manifest_name = manifest.metahash() + ".manifest";
     let foreign_manifest = Path::new(args.target()).join(&manifest_name);
 
     manifest.write(manifest_parent_path.join(&manifest_name))?;
