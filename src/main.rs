@@ -193,6 +193,10 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // So, if any of that stuff exists, we let the user know and bail. Unless, of course, we
     // force, of course....
 
+    // FIXME: If the file conflict is in an existing manifest, the transfer can be safely skipped
+    // FOR THAT FILE and we can continue with the others, so that's something to consider for a
+    // future enhancement.
+
     if !args.force && foreign_paths.iter().any(|path| path.exists()) {
         return Err(anyhow::anyhow!("file conflict in target location"));
     }
