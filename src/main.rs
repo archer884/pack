@@ -320,8 +320,11 @@ fn check_files(
     root: &Path,
     manifest_paths: impl IntoIterator<Item = PathBuf>,
 ) -> anyhow::Result<()> {
+    let mut has_files = false;
+    
     for manifest_path in manifest_paths {
         let manifest = load_manifest(&manifest_path)?;
+        has_files = true;
 
         let mut has_error = false;
 
@@ -349,6 +352,10 @@ fn check_files(
             println!("{}", "Ok".green());
             fs::remove_file(manifest_path)?;
         }
+    }
+
+    if !has_files {
+        println!("manifest not found");
     }
 
     Ok(())
