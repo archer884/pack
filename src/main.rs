@@ -45,8 +45,13 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    /// run manifest finalize action
+    #[clap(alias = "f")]
+    Finalize { path: Option<String> },
+
     /// check files (on the receiving side)
     Check { path: Option<String> },
+
     /// remove files
     ///
     /// This removes the files found in a manifest file before removing the manifest file itself.
@@ -84,8 +89,13 @@ impl Args {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+enum FinalizeAction {
+    Check,
+    Cleanup,
+}
+
+#[derive(Clone, Debug, Default)]
 struct Manifest {
     items: IndexMap<PathBuf, String>,
 }
@@ -105,15 +115,6 @@ impl Manifest {
         Ok(())
     }
 
-    fn reconstruct_paths<'a>(
-        &'a self,
-        parent: impl AsRef<Path> + 'a,
-    ) -> impl Iterator<Item = PathBuf> + 'a {
-        self.items
-            .keys()
-            .map(move |path| parent.as_ref().join(path))
-    }
-
     fn metahash(&self) -> String {
         let mut hasher = Sha1::new();
         for (_, hash) in &self.items {
@@ -122,10 +123,38 @@ impl Manifest {
         hasher.digest().to_string()
     }
 
-    fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    fn write(&self, path: impl AsRef<Path>, action: FinalizeAction) -> io::Result<()> {
         let mut file = File::create(path)?;
-        Ok(serde_json::to_writer_pretty(&mut file, self)?)
+        let template = WriteActionManifest {
+            action,
+            items: &self.items,
+        };
+
+        Ok(serde_json::to_writer_pretty(&mut file, &template)?)
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ActionManifest {
+    action: Option<FinalizeAction>,
+    items: IndexMap<PathBuf, String>,
+}
+
+impl ActionManifest {
+    fn reconstruct_paths<'a>(
+        &'a self,
+        parent: impl AsRef<Path> + 'a,
+    ) -> impl Iterator<Item = PathBuf> + 'a {
+        self.items
+            .keys()
+            .map(move |path| parent.as_ref().join(path))
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WriteActionManifest<'a> {
+    action: FinalizeAction,
+    items: &'a IndexMap<PathBuf, String>,
 }
 
 fn get_hash(path: impl AsRef<Path>) -> io::Result<String> {
@@ -231,8 +260,11 @@ fn run(args: &Args) -> anyhow::Result<()> {
     let manifest_name = manifest.metahash() + ".manifest";
     let foreign_manifest = Path::new(args.target()).join(&manifest_name);
 
-    manifest.write(manifest_parent_path.join(&manifest_name))?;
-    manifest.write(foreign_manifest)?;
+    manifest.write(
+        manifest_parent_path.join(&manifest_name),
+        FinalizeAction::Cleanup,
+    )?;
+    manifest.write(foreign_manifest, FinalizeAction::Check)?;
 
     Ok(())
 }
@@ -262,6 +294,42 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
 
 fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
     match command {
+        Command::Finalize { path } => {
+            let mut has_files = false;
+            let path = get_root_path(path);
+
+            for manifest_path in get_manifest_paths(&path)? {
+                let manifest = load_manifest(&manifest_path)?;
+                has_files = true;
+
+                if let Some(action) = manifest.action {
+                    match action {
+                        FinalizeAction::Check => {
+                            if !check_manifest_files(&path, &manifest)? {
+                                std::process::exit(1);
+                            } else {
+                                println!("{}", "Ok".green());
+                                fs::remove_file(manifest_path)?;
+                            }
+                        }
+
+                        FinalizeAction::Cleanup => {
+                            manifest
+                                .reconstruct_paths(&path)
+                                .try_for_each(remove_or_warn)?;
+                            fs::remove_file(&manifest_path)?;
+                        }
+                    }
+                }
+            }
+
+            if !has_files {
+                println!("manifest not found");
+            }
+
+            Ok(())
+        }
+
         Command::Clean { path } => {
             let path = get_root_path(path);
             clean_files(&path, get_manifest_paths(&path)?)
@@ -321,32 +389,12 @@ fn check_files(
     manifest_paths: impl IntoIterator<Item = PathBuf>,
 ) -> anyhow::Result<()> {
     let mut has_files = false;
-    
+
     for manifest_path in manifest_paths {
         let manifest = load_manifest(&manifest_path)?;
         has_files = true;
 
-        let mut has_error = false;
-
-        for (file_name, hash) in &manifest.items {
-            let reconstructed_path = root.join(file_name);
-            if !reconstructed_path.exists() {
-                let missing = "missing".yellow();
-                let file_name = file_name.display();
-                eprintln!("{missing} {file_name}");
-                has_error = true;
-            }
-
-            let reconstructed_hash = get_hash(&reconstructed_path)?;
-            if &*reconstructed_hash != hash {
-                let mismatch = "mismatch".red();
-                let file_name = file_name.display();
-                eprintln!("{mismatch} {file_name}");
-                has_error = true;
-            }
-        }
-
-        if has_error {
+        if !check_manifest_files(root, &manifest)? {
             std::process::exit(1);
         } else {
             println!("{}", "Ok".green());
@@ -361,7 +409,32 @@ fn check_files(
     Ok(())
 }
 
-fn load_manifest(path: &Path) -> io::Result<Manifest> {
+/// Checks manifest files.
+///
+/// Boolean result indicates success for all files in manifest.
+fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bool> {
+    for (file_name, hash) in &manifest.items {
+        let reconstructed_path = root.join(file_name);
+        if !reconstructed_path.exists() {
+            let missing = "missing".yellow();
+            let file_name = file_name.display();
+            eprintln!("{missing} {file_name}");
+            return Ok(false);
+        }
+
+        let reconstructed_hash = get_hash(&reconstructed_path)?;
+        if &*reconstructed_hash != hash {
+            let mismatch = "mismatch".red();
+            let file_name = file_name.display();
+            eprintln!("{mismatch} {file_name}");
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn load_manifest(path: &Path) -> io::Result<ActionManifest> {
     let text = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
 }
