@@ -95,42 +95,95 @@ enum FinalizeAction {
     Cleanup,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
+struct ManifestItem {
+    path: PathBuf,
+    name: String,
+    hash: String,
+}
+
+impl ManifestItem {
+    fn new(root: &Path, path: &Path) -> io::Result<Self> {
+        if !path.is_file() {
+            return Err(io::Error::new(io::ErrorKind::Other, "path must be a file"));
+        }
+
+        Ok(Self {
+            path: path.strip_prefix(root).unwrap_or_else(|_| path).into(),
+            name: path.file_name().unwrap().to_str().unwrap().to_string(),
+            hash: get_hash(path)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Manifest {
-    items: IndexMap<PathBuf, String>,
+    root: PathBuf,
+    items: Vec<ManifestItem>,
 }
 
 impl Manifest {
-    fn push(&mut self, path: &Path) -> io::Result<()> {
-        let name = path
-            .file_name()
-            // Commented line uses unstable feature
-            // see issue #86442 <https://github.com/rust-lang/rust/issues/86442> for more information
-            // Note: these morons need to hurry up and stabilize this, because it's getting annoying.
-            // .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidFilename, "path must be a file"))?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "path must be a file"))?
-            .into();
+    fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            root: path.into(),
+            items: Default::default(),
+        }
+    }
 
-        self.items.insert(name, get_hash(path)?);
+    fn push(&mut self, path: &Path) -> io::Result<()> {
+        let item = ManifestItem::new(&self.root, path)?;
+        self.items.push(item);
         Ok(())
     }
 
     fn metahash(&self) -> String {
         let mut hasher = Sha1::new();
-        for (_, hash) in &self.items {
-            hasher.update(hash.as_bytes());
+        for item in &self.items {
+            hasher.update(item.hash.as_bytes());
         }
         hasher.digest().to_string()
     }
 
     fn write(&self, path: impl AsRef<Path>, action: FinalizeAction) -> io::Result<()> {
-        let mut file = File::create(path)?;
-        let template = WriteActionManifest {
-            action,
-            items: &self.items,
-        };
+        
+        // The recorded path of each item needs to differ between the sending and receiving sides.
+        // We're going to infer whether we are on the sending or receiving side on the basis of
+        // the FinalizeAction. This is wrong. Do as I do, not as I say.
 
-        Ok(serde_json::to_writer_pretty(&mut file, &template)?)
+        // Don't even get me started on the nonsense that is the items map below....
+
+        match action {
+            FinalizeAction::Check => {
+                let mut file = File::create(path)?;
+                let mut items = IndexMap::new();
+
+                for item in &self.items {
+                    items.insert(PathBuf::from(&item.name), item.hash.clone());
+                }
+
+                let template = WriteActionManifest {
+                    action,
+                    items: &items,
+                };
+
+                Ok(serde_json::to_writer_pretty(&mut file, &template)?)
+            },
+            FinalizeAction::Cleanup => {
+                let mut file = File::create(path)?;
+                let mut items = IndexMap::new();
+
+                for item in &self.items {
+                    items.insert(item.path.clone(), item.hash.clone());
+                }
+
+                let template = WriteActionManifest {
+                    action,
+                    items: &items,
+                };
+
+                Ok(serde_json::to_writer_pretty(&mut file, &template)?)
+            },
+        }
     }
 }
 
@@ -234,7 +287,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // all these paths are owned by something stable.
 
     let mut filter = HashSet::new();
-    let mut manifest = Manifest::default();
+    let mut manifest = Manifest::new(&*manifest_parent_path);
 
     let pairs = paths.iter().zip(foreign_paths.iter());
 
