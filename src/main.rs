@@ -3,9 +3,10 @@ use std::{
     collections::HashSet,
     env,
     ffi::OsStr,
+    fmt::Display,
     fs::{self, File, OpenOptions},
     io,
-    path::{Path, PathBuf}, fmt::Display,
+    path::{Path, PathBuf},
 };
 
 use blake3::Hasher;
@@ -26,7 +27,12 @@ struct FileConflictErr {
 
 impl Display for FileConflictErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "file conflict in target location: {}\n -> {}", self.local.display(), self.foreign.display())
+        writeln!(
+            f,
+            "file conflict in target location: {}\n -> {}",
+            self.local.display(),
+            self.foreign.display()
+        )
     }
 }
 
@@ -159,7 +165,6 @@ impl Manifest {
     }
 
     fn write(&self, path: impl AsRef<Path>, action: FinalizeAction) -> io::Result<()> {
-        
         // The recorded path of each item needs to differ between the sending and receiving sides.
         // We're going to infer whether we are on the sending or receiving side on the basis of
         // the FinalizeAction. This is wrong. Do as I do, not as I say.
@@ -181,7 +186,7 @@ impl Manifest {
                 };
 
                 Ok(serde_json::to_writer_pretty(&mut file, &template)?)
-            },
+            }
             FinalizeAction::Cleanup => {
                 let mut file = File::create(path)?;
                 let mut items = IndexMap::new();
@@ -196,7 +201,7 @@ impl Manifest {
                 };
 
                 Ok(serde_json::to_writer_pretty(&mut file, &template)?)
-            },
+            }
         }
     }
 }
