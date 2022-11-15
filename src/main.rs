@@ -5,7 +5,7 @@ use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io,
-    path::{Path, PathBuf},
+    path::{Path, PathBuf}, fmt::Display,
 };
 
 use blake3::Hasher;
@@ -17,6 +17,20 @@ use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use sha1_smol::Sha1;
 use unicase::UniCase;
+
+#[derive(Debug)]
+struct FileConflictErr {
+    local: PathBuf,
+    foreign: PathBuf,
+}
+
+impl Display for FileConflictErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "file conflict in target location: {}\n -> {}", self.local.display(), self.foreign.display())
+    }
+}
+
+impl std::error::Error for FileConflictErr {}
 
 #[derive(Clone, Debug, Parser)]
 #[clap(version, subcommand_negates_reqs(true))]
@@ -109,7 +123,7 @@ impl ManifestItem {
         }
 
         Ok(Self {
-            path: path.strip_prefix(root).unwrap_or_else(|_| path).into(),
+            path: path.strip_prefix(root).unwrap_or(path).into(),
             name: path.file_name().unwrap().to_str().unwrap().to_string(),
             hash: get_hash(path)?,
         })
@@ -259,7 +273,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // Fuck your lifetime.
 
     paths.sort_by_cached_key(|path| {
-        let s = scratch.alloc_str(&*path.as_os_str().to_string_lossy());
+        let s = scratch.alloc_str(&path.as_os_str().to_string_lossy());
         UniCase::new(s)
     });
 
@@ -267,9 +281,9 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // there are any path conflicts. We also need to see whether or not there's a manifest file on
     // the receiving end. Let's just do that now.
 
-    let foreign_paths: Vec<_> = paths
+    let path_pairs: Vec<_> = paths
         .iter()
-        .map(|path| make_target_path(args.target().as_ref(), path))
+        .map(|path| (path, make_target_path(args.target().as_ref(), path)))
         .collect();
 
     // So, if any of that stuff exists, we let the user know and bail. Unless, of course, we
@@ -279,8 +293,15 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // FOR THAT FILE and we can continue with the others, so that's something to consider for a
     // future enhancement.
 
-    if !args.force && foreign_paths.iter().any(|path| path.exists()) {
-        return Err(anyhow::anyhow!("file conflict in target location"));
+    if !args.force {
+        for (local, foreign) in &path_pairs {
+            if foreign.exists() {
+                Err(FileConflictErr {
+                    local: local.into(),
+                    foreign: foreign.to_owned(),
+                })?;
+            }
+        }
     }
 
     // Thankfully, it's a lot easier to pull this trick with the case insensitive filter now that
@@ -289,23 +310,21 @@ fn run(args: &Args) -> anyhow::Result<()> {
     let mut filter = HashSet::new();
     let mut manifest = Manifest::new(&*manifest_parent_path);
 
-    let pairs = paths.iter().zip(foreign_paths.iter());
-
-    for (path, target) in pairs {
+    for (path, target) in path_pairs {
         if !filter.insert(UniCase::new(path.as_os_str().to_string_lossy())) {
             continue;
         }
 
         manifest.push(path)?;
 
-        let mut reader = File::open(&path)?;
-        let mut writer = create_target_file(target, args)?;
+        let mut reader = File::open(path)?;
+        let mut writer = create_target_file(&target, args)?;
 
         io::copy(&mut reader, &mut writer)?;
 
         if !args.quiet {
             // FIXME: We already did this once, but I guess we're doing it again.
-            let name = target.strip_prefix(&args.target())?;
+            let name = target.strip_prefix(args.target())?;
             println!("{}", name.display());
         }
     }
@@ -339,9 +358,9 @@ fn make_target_path(target: &Path, path: &Path) -> PathBuf {
 
 fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
     if args.force {
-        File::create(&path)
+        File::create(path)
     } else {
-        OpenOptions::new().create_new(true).write(true).open(&path)
+        OpenOptions::new().create_new(true).write(true).open(path)
     }
 }
 
