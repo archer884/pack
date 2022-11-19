@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashSet,
     env,
     ffi::OsStr,
     fmt::Display,
@@ -13,8 +12,8 @@ use blake3::Hasher;
 use bumpalo::Bump;
 use clap::{Parser, Subcommand};
 use either::Either;
+use hashbrown::{HashMap, HashSet};
 use indexmap::IndexMap;
-use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use sha1_smol::Sha1;
 use unicase::UniCase;
@@ -37,6 +36,17 @@ impl Display for FileConflictErr {
 }
 
 impl std::error::Error for FileConflictErr {}
+
+#[derive(Debug)]
+struct IncompatibleGlobPatternErr(PathBuf);
+
+impl Display for IncompatibleGlobPatternErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "glob pattern incompatible: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for IncompatibleGlobPatternErr {}
 
 #[derive(Clone, Debug, Parser)]
 #[clap(version, subcommand_negates_reqs(true))]
@@ -134,6 +144,12 @@ impl ManifestItem {
             hash: get_hash(path)?,
         })
     }
+}
+
+#[derive(Clone, Debug)]
+struct ForeignManifestItem {
+    path: PathBuf,
+    hash: String,
 }
 
 #[derive(Clone, Debug)]
@@ -236,6 +252,11 @@ fn get_hash(path: impl AsRef<Path>) -> io::Result<String> {
     Ok(hasher.finalize().to_string())
 }
 
+#[derive(Debug, Deserialize)]
+struct ReadManifest {
+    items: HashMap<String, String>,
+}
+
 fn main() {
     if let Err(e) = run(&Args::parse()) {
         eprintln!("{e}");
@@ -294,13 +315,14 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // So, if any of that stuff exists, we let the user know and bail. Unless, of course, we
     // force, of course....
 
-    // FIXME: If the file conflict is in an existing manifest, the transfer can be safely skipped
-    // FOR THAT FILE and we can continue with the others, so that's something to consider for a
-    // future enhancement.
+    // ALSO, we can ignore conflicts (and transfers) for any file found in any manifest in the
+    // target location.
+
+    let manifest_blacklist = read_target_manifests(args.target())?;
 
     if !args.force {
         for (local, foreign) in &path_pairs {
-            if foreign.exists() {
+            if foreign.exists()  {
                 Err(FileConflictErr {
                     local: local.into(),
                     foreign: foreign.to_owned(),
@@ -370,6 +392,8 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
 }
 
 fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
+    use owo_colors::OwoColorize;
+
     match command {
         Command::Finalize { path } => {
             let mut has_files = false;
@@ -452,6 +476,8 @@ fn clean_files(
 }
 
 fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
+    use owo_colors::OwoColorize;
+
     let path = path.as_ref();
     if !path.exists() {
         eprintln!("{} {}", "file not found:".yellow(), path.display());
@@ -465,6 +491,8 @@ fn check_files(
     root: &Path,
     manifest_paths: impl IntoIterator<Item = PathBuf>,
 ) -> anyhow::Result<()> {
+    use owo_colors::OwoColorize;
+
     let mut has_files = false;
 
     for manifest_path in manifest_paths {
@@ -490,6 +518,8 @@ fn check_files(
 ///
 /// Boolean result indicates success for all files in manifest.
 fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bool> {
+    use owo_colors::OwoColorize;
+
     for (file_name, hash) in &manifest.items {
         let reconstructed_path = root.join(file_name);
         if !reconstructed_path.exists() {
@@ -509,6 +539,40 @@ fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bo
     }
 
     Ok(true)
+}
+
+fn read_target_manifests(path: impl AsRef<Path>) -> anyhow::Result<Vec<ForeignManifestItem>> {
+    let path = path.as_ref().join("*.manifest");
+    let pattern = path
+        .to_str()
+        .ok_or_else(|| IncompatibleGlobPatternErr(path.clone()))?;
+
+    // No-copy deserialization lifetime gets weird here. I'm not totally clear on the value of
+    // allocating these strings this way, either. If nothing else, it means *fewer* allocations
+    // overall, which is probably more important than allocating less memory.
+
+    let arena = Bump::new();
+    let candidate_files = globwalk::glob(pattern)?;
+
+    let hashes: Vec<_> = candidate_files
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let text = &*arena.alloc(fs::read_to_string(entry.path()).ok()?);
+            let manifest: ReadManifest = serde_json::from_str(&text).ok()?;
+            Some(
+                manifest
+                    .items
+                    .into_iter()
+                    .map(|(path, hash)| ForeignManifestItem {
+                        path: path.into(),
+                        hash,
+                    }),
+            )
+        })
+        .flatten()
+        .collect();
+
+    Ok(hashes)
 }
 
 fn load_manifest(path: &Path) -> io::Result<ActionManifest> {

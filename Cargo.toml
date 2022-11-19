@@ -12,6 +12,7 @@ bumpalo = "3.9.1"
 clap = { version = "3.1.18", features = ["derive"] }
 either = "1.6.1"
 globwalk = "0.8.1"
+hashbrown = { version = "0.13.1", features = ["serde"] }
 indexmap = { version = "1.8.1", features = ["serde"] }
 os_str_bytes = "6.0.1"
 owo-colors = "3.4.0"
