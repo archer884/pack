@@ -2,51 +2,26 @@ use std::{
     borrow::Cow,
     env,
     ffi::OsStr,
-    fmt::Display,
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
 };
 
+mod error;
+mod manifest;
+
 use blake3::Hasher;
 use bumpalo::Bump;
 use clap::{Parser, Subcommand};
 use either::Either;
-use hashbrown::{HashMap, HashSet};
+use error::Error;
+use hashbrown::HashSet;
 use indexmap::IndexMap;
+use manifest::{Action, Manifest, ManifestBuilder};
 use serde::{Deserialize, Serialize};
-use sha1_smol::Sha1;
 use unicase::UniCase;
 
-#[derive(Debug)]
-struct FileConflictErr {
-    local: PathBuf,
-    foreign: PathBuf,
-}
-
-impl Display for FileConflictErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "file conflict in target location: {}\n -> {}",
-            self.local.display(),
-            self.foreign.display()
-        )
-    }
-}
-
-impl std::error::Error for FileConflictErr {}
-
-#[derive(Debug)]
-struct IncompatibleGlobPatternErr(PathBuf);
-
-impl Display for IncompatibleGlobPatternErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "glob pattern incompatible: {:?}", self.0)
-    }
-}
-
-impl std::error::Error for IncompatibleGlobPatternErr {}
+type Result<T, E = error::Error> = std::result::Result<T, E>;
 
 #[derive(Clone, Debug, Parser)]
 #[clap(version, subcommand_negates_reqs(true))]
@@ -119,112 +94,9 @@ impl Args {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-enum FinalizeAction {
-    Check,
-    Cleanup,
-}
-
-#[derive(Clone, Debug)]
-struct ManifestItem {
-    path: PathBuf,
-    name: String,
-    hash: String,
-}
-
-impl ManifestItem {
-    fn new(root: &Path, path: &Path) -> io::Result<Self> {
-        if !path.is_file() {
-            return Err(io::Error::new(io::ErrorKind::Other, "path must be a file"));
-        }
-
-        Ok(Self {
-            path: path.strip_prefix(root).unwrap_or(path).into(),
-            name: path.file_name().unwrap().to_str().unwrap().to_string(),
-            hash: get_hash(path)?,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ForeignManifestItem {
-    path: PathBuf,
-    hash: String,
-}
-
-#[derive(Clone, Debug)]
-struct Manifest {
-    root: PathBuf,
-    items: Vec<ManifestItem>,
-}
-
-impl Manifest {
-    fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            root: path.into(),
-            items: Default::default(),
-        }
-    }
-
-    fn push(&mut self, path: &Path) -> io::Result<()> {
-        let item = ManifestItem::new(&self.root, path)?;
-        self.items.push(item);
-        Ok(())
-    }
-
-    fn metahash(&self) -> String {
-        let mut hasher = Sha1::new();
-        for item in &self.items {
-            hasher.update(item.hash.as_bytes());
-        }
-        hasher.digest().to_string()
-    }
-
-    fn write(&self, path: impl AsRef<Path>, action: FinalizeAction) -> io::Result<()> {
-        // The recorded path of each item needs to differ between the sending and receiving sides.
-        // We're going to infer whether we are on the sending or receiving side on the basis of
-        // the FinalizeAction. This is wrong. Do as I do, not as I say.
-
-        // Don't even get me started on the nonsense that is the items map below....
-
-        match action {
-            FinalizeAction::Check => {
-                let mut file = File::create(path)?;
-                let mut items = IndexMap::new();
-
-                for item in &self.items {
-                    items.insert(PathBuf::from(&item.name), item.hash.clone());
-                }
-
-                let template = WriteActionManifest {
-                    action,
-                    items: &items,
-                };
-
-                Ok(serde_json::to_writer_pretty(&mut file, &template)?)
-            }
-            FinalizeAction::Cleanup => {
-                let mut file = File::create(path)?;
-                let mut items = IndexMap::new();
-
-                for item in &self.items {
-                    items.insert(item.path.clone(), item.hash.clone());
-                }
-
-                let template = WriteActionManifest {
-                    action,
-                    items: &items,
-                };
-
-                Ok(serde_json::to_writer_pretty(&mut file, &template)?)
-            }
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize)]
 struct ActionManifest {
-    action: Option<FinalizeAction>,
+    action: Option<Action>,
     items: IndexMap<PathBuf, String>,
 }
 
@@ -241,7 +113,7 @@ impl ActionManifest {
 
 #[derive(Clone, Debug, Serialize)]
 struct WriteActionManifest<'a> {
-    action: FinalizeAction,
+    action: Action,
     items: &'a IndexMap<PathBuf, String>,
 }
 
@@ -252,9 +124,26 @@ fn get_hash(path: impl AsRef<Path>) -> io::Result<String> {
     Ok(hasher.finalize().to_string())
 }
 
-#[derive(Debug, Deserialize)]
-struct ReadManifest {
-    items: HashMap<String, String>,
+/// Source and target paths for a file transfer
+struct TransferPair<'a> {
+    /// local source path
+    source: &'a Path,
+
+    /// projected foreign path
+    target: PathBuf,
+}
+
+impl<'a> TransferPair<'a> {
+    fn new(source: &'a Path, target: PathBuf) -> Self {
+        Self { source, target }
+    }
+}
+
+#[derive(Debug)]
+pub struct Conflict {
+    #[allow(unused)]
+    source: PathBuf,
+    target: PathBuf,
 }
 
 fn main() {
@@ -264,44 +153,18 @@ fn main() {
     }
 }
 
-fn run(args: &Args) -> anyhow::Result<()> {
+fn run(args: &Args) -> Result<()> {
     if let Some(command) = &args.command {
         return execute_subcommand(command);
     }
-
-    // See, this is where the fun starts...
 
     let (manifest_parent_path, paths) = match args.try_get_dir() {
         Some(dir) => (Cow::from(dir), Either::Left(read_dir(dir)?)),
         None => (std::env::current_dir()?.into(), Either::Right(args.paths())),
     };
 
-    // Sorting paths is non fucking trivial, because the best way to sort paths has absolutely
-    // nothing to do with the default cmp implementation on either String or PathBuf or *whatever.*
-    // The reality is that no one in their right mind wants A and a to appear so far from one
-    // another in any list of items, so fuck that. I'm trying to use unicase to perform a case
-    // insensitive comparison, because I'm sick and tired of rewriting my own case insensitizer
-    // every time I come to party (and I ALWAYS come to party), but I have no idea what its
-    // constructor does and it's actually pretty expensive to make one out of a path because I need
-    // to convert to a UTF8 string first (which is PROBABLY a noop, but whatever)...
-
-    // This is a big problem because I can't just cache the damn things. They only borrow data and
-    // I can't keep it around because of the semantics of sort_by_cached_key() unless it's stored
-    // somewhere else--and the fact that it's stored on the vector itself is worthless because the
-    // vector is being sorted, so all the references are about to be invalidated! Which means I
-    // have only one solution left to fall back on.
-
-    // Prepare yourself.
-
-    let scratch = Bump::new();
     let mut paths: Vec<_> = paths.collect();
-
-    // Fuck your lifetime.
-
-    paths.sort_by_cached_key(|path| {
-        let s = scratch.alloc_str(&path.as_os_str().to_string_lossy());
-        UniCase::new(s)
-    });
+    sort_paths(&mut paths);
 
     // Before we actually start this whole big long process, I actually want to check to see if
     // there are any path conflicts. We also need to see whether or not there's a manifest file on
@@ -309,63 +172,89 @@ fn run(args: &Args) -> anyhow::Result<()> {
 
     let path_pairs: Vec<_> = paths
         .iter()
-        .map(|path| (path, make_target_path(args.target().as_ref(), path)))
+        .map(|path| TransferPair::new(path, make_target_path(args.target().as_ref(), path)))
         .collect();
 
-    // So, if any of that stuff exists, we let the user know and bail. Unless, of course, we
-    // force, of course....
-
-    // ALSO, we can ignore conflicts (and transfers) for any file found in any manifest in the
-    // target location.
-
-    let manifest_blacklist = read_target_manifests(args.target())?;
+    // If the user has NOT requested that we overwrite target files, we will check for all file
+    // conflicts before initiating the transfer. Assuming the user didn't request that we overwrite
+    // existing files, we'll bail if we encounter any.
 
     if !args.force {
-        for (local, foreign) in &path_pairs {
-            if foreign.exists()  {
-                Err(FileConflictErr {
-                    local: local.into(),
-                    foreign: foreign.to_owned(),
-                })?;
-            }
-        }
+        check_conflicts(&path_pairs)?;
     }
 
-    // Thankfully, it's a lot easier to pull this trick with the case insensitive filter now that
-    // all these paths are owned by something stable.
+    // The next step is to construct the manifest for the transfer. We'll be using that to ensure
+    // we don't bother transfering any files that already exist in the target location (which we
+    // will determine on the basis of any existing manifests in the target location).
 
+    let existing_hashes = read_target_manifests(args.target())?;
+    let mut builder = ManifestBuilder::new(manifest_parent_path.as_ref());
     let mut filter = HashSet::new();
-    let mut manifest = Manifest::new(&*manifest_parent_path);
 
-    for (path, target) in path_pairs {
-        if !filter.insert(UniCase::new(path.as_os_str().to_string_lossy())) {
+    for pair in &path_pairs {
+        // We may have files which differ only in their casing. We don't actually want to perform
+        // multiple transfers in this case, because the target file system (probably a Windows-like
+        // file share) will not support this behavior. That's the purpose of this filter.
+        if !filter.insert(UniCase::new(pair.source.as_os_str().to_string_lossy())) {
             continue;
         }
 
-        manifest.push(path)?;
-
-        let mut reader = File::open(path)?;
-        let mut writer = create_target_file(&target, args)?;
-
-        io::copy(&mut reader, &mut writer)?;
-
-        if !args.quiet {
-            // FIXME: We already did this once, but I guess we're doing it again.
-            let name = target.strip_prefix(args.target())?;
-            println!("{}", name.display());
+        // We're also going to skip transfering anything found in the existing hashes list above.
+        let candidate = builder.build_item(&pair.source)?;
+        if !existing_hashes.contains(&candidate.hash) {
+            builder.push(candidate);
+            let mut reader = File::open(pair.source)?;
+            let mut writer = create_target_file(&pair.target, args)?;
+            io::copy(&mut reader, &mut writer)?;
         }
     }
 
-    let manifest_name = manifest.metahash() + ".manifest";
+    let manifest_name = builder.metahash() + ".manifest";
     let foreign_manifest = Path::new(args.target()).join(&manifest_name);
 
-    manifest.write(
-        manifest_parent_path.join(&manifest_name),
-        FinalizeAction::Cleanup,
-    )?;
-    manifest.write(foreign_manifest, FinalizeAction::Check)?;
+    builder.write(manifest_parent_path.join(&manifest_name), Action::Cleanup)?;
+    builder.write(foreign_manifest, Action::Check)?;
 
     Ok(())
+}
+
+/// Performs a case insensitive sort paths.
+///
+/// Sorting paths is apparently non-fucking trivial, because the best way to sort paths has nothing
+/// to do with the default cmp implementation on either String or PathBuf or anything else. The
+/// reality is that no one cares about casing when they sort these; they want "a tale of two
+/// cities" and "A Tale of Two Cities" to appear right next to one another, but the comparison
+/// method doesn't *get* that. As such we're using `unicase` to perform the actual sort.
+///
+/// This is a problem because we need to cache these keys, so we're also using `bumpalo` to perform
+/// the cacheing for us. (This is purely for performance reasons, meaning it's pointless.)
+///
+/// A big advantage of doing this in a separate function is we can immediately free up this arena.
+fn sort_paths(paths: &mut [PathBuf]) {
+    let arena = Bump::new();
+    paths.sort_by_cached_key(|path| {
+        let s = arena.alloc_str(&path.as_os_str().to_string_lossy());
+        UniCase::new(s)
+    });
+}
+
+fn check_conflicts(pairs: &[TransferPair]) -> Result<()> {
+    let mut conflicts = Vec::new();
+
+    for pair in pairs {
+        if pair.target.exists() {
+            conflicts.push(Conflict {
+                source: pair.source.into(),
+                target: pair.target.clone(),
+            });
+        }
+    }
+
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Conflict(conflicts))
+    }
 }
 
 fn read_dir(path: &Path) -> io::Result<impl Iterator<Item = PathBuf>> {
@@ -391,9 +280,7 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
     }
 }
 
-fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
-    use owo_colors::OwoColorize;
-
+fn execute_subcommand(command: &Command) -> Result<()> {
     match command {
         Command::Finalize { path } => {
             let mut has_files = false;
@@ -405,16 +292,16 @@ fn execute_subcommand(command: &Command) -> anyhow::Result<()> {
 
                 if let Some(action) = manifest.action {
                     match action {
-                        FinalizeAction::Check => {
+                        Action::Check => {
                             if !check_manifest_files(&path, &manifest)? {
                                 std::process::exit(1);
                             } else {
-                                println!("{}", "Ok".green());
+                                println!("{}", "Ok");
                                 fs::remove_file(manifest_path)?;
                             }
                         }
 
-                        FinalizeAction::Cleanup => {
+                        Action::Cleanup => {
                             manifest
                                 .reconstruct_paths(&path)
                                 .try_for_each(remove_or_warn)?;
@@ -463,7 +350,7 @@ fn get_root_path(maybe: &Option<String>) -> Cow<Path> {
 fn clean_files(
     root: &Path,
     manifest_paths: impl IntoIterator<Item = PathBuf>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     for manifest_path in manifest_paths {
         let manifest = load_manifest(&manifest_path)?;
         manifest
@@ -476,11 +363,9 @@ fn clean_files(
 }
 
 fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
-    use owo_colors::OwoColorize;
-
     let path = path.as_ref();
     if !path.exists() {
-        eprintln!("{} {}", "file not found:".yellow(), path.display());
+        eprintln!("{} {}", "file not found:", path.display());
         return Ok(());
     }
 
@@ -490,9 +375,7 @@ fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
 fn check_files(
     root: &Path,
     manifest_paths: impl IntoIterator<Item = PathBuf>,
-) -> anyhow::Result<()> {
-    use owo_colors::OwoColorize;
-
+) -> Result<()> {
     let mut has_files = false;
 
     for manifest_path in manifest_paths {
@@ -502,7 +385,7 @@ fn check_files(
         if !check_manifest_files(root, &manifest)? {
             std::process::exit(1);
         } else {
-            println!("{}", "Ok".green());
+            println!("{}", "Ok");
             fs::remove_file(manifest_path)?;
         }
     }
@@ -518,12 +401,10 @@ fn check_files(
 ///
 /// Boolean result indicates success for all files in manifest.
 fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bool> {
-    use owo_colors::OwoColorize;
-
     for (file_name, hash) in &manifest.items {
         let reconstructed_path = root.join(file_name);
         if !reconstructed_path.exists() {
-            let missing = "missing".yellow();
+            let missing = "missing";
             let file_name = file_name.display();
             eprintln!("{missing} {file_name}");
             return Ok(false);
@@ -531,7 +412,7 @@ fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bo
 
         let reconstructed_hash = get_hash(&reconstructed_path)?;
         if &*reconstructed_hash != hash {
-            let mismatch = "mismatch".red();
+            let mismatch = "mismatch";
             let file_name = file_name.display();
             eprintln!("{mismatch} {file_name}");
             return Ok(false);
@@ -541,33 +422,23 @@ fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bo
     Ok(true)
 }
 
-fn read_target_manifests(path: impl AsRef<Path>) -> anyhow::Result<Vec<ForeignManifestItem>> {
+fn read_target_manifests(path: impl AsRef<Path>) -> Result<HashSet<String>> {
     let path = path.as_ref().join("*.manifest");
-    let pattern = path
-        .to_str()
-        .ok_or_else(|| IncompatibleGlobPatternErr(path.clone()))?;
+    let pattern = path.to_str().unwrap();
 
     // No-copy deserialization lifetime gets weird here. I'm not totally clear on the value of
     // allocating these strings this way, either. If nothing else, it means *fewer* allocations
     // overall, which is probably more important than allocating less memory.
 
     let arena = Bump::new();
-    let candidate_files = globwalk::glob(pattern)?;
+    let candidate_files = globwalk::glob(pattern).unwrap();
 
-    let hashes: Vec<_> = candidate_files
+    let hashes: HashSet<_> = candidate_files
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let text = &*arena.alloc(fs::read_to_string(entry.path()).ok()?);
-            let manifest: ReadManifest = serde_json::from_str(&text).ok()?;
-            Some(
-                manifest
-                    .items
-                    .into_iter()
-                    .map(|(path, hash)| ForeignManifestItem {
-                        path: path.into(),
-                        hash,
-                    }),
-            )
+            let manifest: Manifest = serde_json::from_str(&text).ok()?;
+            Some(manifest.items.into_iter().map(|(_path, hash)| hash))
         })
         .flatten()
         .collect();

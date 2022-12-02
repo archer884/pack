@@ -1,12 +1,11 @@
 [package]
 name = "pack"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.57"
 blake3 = "1.3.1"
 bumpalo = "3.9.1"
 clap = { version = "3.1.18", features = ["derive"] }
@@ -15,8 +14,10 @@ globwalk = "0.8.1"
 hashbrown = { version = "0.13.1", features = ["serde"] }
 indexmap = { version = "1.8.1", features = ["serde"] }
 os_str_bytes = "6.0.1"
-owo-colors = "3.4.0"
+# I'm going to add this back, but I want to get a handle on the location of calls to this
+# owo-colors = "3.4.0"
 serde = { version = "1.0.137", features = ["derive"] }
 serde_json = "1.0.81"
 sha1_smol = "1.0.0"
+thiserror = "1.0.37"
 unicase = "2.6.0"
