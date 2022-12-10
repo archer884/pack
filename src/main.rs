@@ -8,6 +8,7 @@ use std::{
 };
 
 mod error;
+mod file;
 mod manifest;
 
 use blake3::Hasher;
@@ -20,6 +21,8 @@ use indexmap::IndexMap;
 use manifest::{Action, Manifest, ManifestBuilder};
 use serde::{Deserialize, Serialize};
 use unicase::UniCase;
+
+use crate::file::DisplayName;
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
@@ -281,6 +284,8 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
 }
 
 fn execute_subcommand(command: &Command) -> Result<()> {
+    use owo_colors::OwoColorize;
+
     match command {
         Command::Finalize { path } => {
             let mut has_files = false;
@@ -296,7 +301,7 @@ fn execute_subcommand(command: &Command) -> Result<()> {
                             if !check_manifest_files(&path, &manifest)? {
                                 std::process::exit(1);
                             } else {
-                                println!("{}", "Ok");
+                                println!("{}", "Ok".green());
                                 fs::remove_file(manifest_path)?;
                             }
                         }
@@ -360,9 +365,11 @@ fn clean_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -
 }
 
 fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
+    use owo_colors::OwoColorize;
+
     let path = path.as_ref();
     if !path.exists() {
-        eprintln!("{} {}", "file not found:", path.display());
+        eprintln!("{} {}", "file not found:".yellow(), path.display_name());
         return Ok(());
     }
 
@@ -371,7 +378,7 @@ fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
 
 fn check_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -> Result<()> {
     use owo_colors::OwoColorize;
-    
+
     let mut has_files = false;
 
     for manifest_path in manifest_paths {
