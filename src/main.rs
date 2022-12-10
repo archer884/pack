@@ -200,7 +200,7 @@ fn run(args: &Args) -> Result<()> {
         }
 
         // We're also going to skip transfering anything found in the existing hashes list above.
-        let candidate = builder.build_item(&pair.source)?;
+        let candidate = builder.build_item(pair.source)?;
         if !existing_hashes.contains(&candidate.hash) {
             builder.push(candidate);
             let mut reader = File::open(pair.source)?;
@@ -347,10 +347,7 @@ fn get_root_path(maybe: &Option<String>) -> Cow<Path> {
         .unwrap_or_else(|| Cow::Owned(env::current_dir().unwrap()))
 }
 
-fn clean_files(
-    root: &Path,
-    manifest_paths: impl IntoIterator<Item = PathBuf>,
-) -> Result<()> {
+fn clean_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -> Result<()> {
     for manifest_path in manifest_paths {
         let manifest = load_manifest(&manifest_path)?;
         manifest
@@ -372,10 +369,9 @@ fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-fn check_files(
-    root: &Path,
-    manifest_paths: impl IntoIterator<Item = PathBuf>,
-) -> Result<()> {
+fn check_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    use owo_colors::OwoColorize;
+    
     let mut has_files = false;
 
     for manifest_path in manifest_paths {
@@ -385,7 +381,7 @@ fn check_files(
         if !check_manifest_files(root, &manifest)? {
             std::process::exit(1);
         } else {
-            println!("{}", "Ok");
+            println!("{}", "Ok".green());
             fs::remove_file(manifest_path)?;
         }
     }
@@ -437,7 +433,7 @@ fn read_target_manifests(path: impl AsRef<Path>) -> Result<HashSet<String>> {
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let text = &*arena.alloc(fs::read_to_string(entry.path()).ok()?);
-            let manifest: Manifest = serde_json::from_str(&text).ok()?;
+            let manifest: Manifest = serde_json::from_str(text).ok()?;
             Some(manifest.items.into_iter().map(|(_path, hash)| hash))
         })
         .flatten()

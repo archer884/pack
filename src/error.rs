@@ -1,4 +1,4 @@
-use std::{fmt::Display, io};
+use std::{fmt::Display, io, path::Path};
 
 use crate::{manifest::ManifestErr, Conflict};
 
@@ -11,12 +11,17 @@ pub enum Error {
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn display_name<'a>(path: &'a Path) -> impl Display + 'a {
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            Path::new(name).display()
+        }
+
         match self {
             Error::Manifest(e) => e.fmt(f),
             Error::Conflict(conflicts) => {
                 f.write_str("encountered file conflicts:\n\n")?;
                 for conflict in conflicts {
-                    write!(f, "  {}", conflict.target.display())?;
+                    writeln!(f, "  {}", display_name(&conflict.target))?;
                 }
                 Ok(())
             }

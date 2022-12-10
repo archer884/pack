@@ -129,8 +129,8 @@ impl ManifestBuilder {
         }
 
         let template = Manifest { action, items };
-
-        Ok(serde_json::to_writer_pretty(&mut File::create(path)?, &template).unwrap())
+        serde_json::to_writer_pretty(&mut File::create(path)?, &template).unwrap();
+        Ok(())
     }
 }
 
