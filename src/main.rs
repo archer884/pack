@@ -26,6 +26,8 @@ use crate::file::DisplayName;
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
+// FIXME: provide option to take paths from stdin for use with extensions(1)
+
 #[derive(Clone, Debug, Parser)]
 #[clap(version, subcommand_negates_reqs(true))]
 struct Args {

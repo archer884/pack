@@ -11,6 +11,6 @@ where
     fn display_name(&self) -> path::Display {
         let path = self.as_ref();
         let name = path.file_name().unwrap_or(path.as_os_str());
-        Path::new(name).display()
+        Path::display(name.as_ref())
     }
 }
