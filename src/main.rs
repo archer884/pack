@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
 };
 
@@ -123,9 +123,28 @@ struct WriteActionManifest<'a> {
 }
 
 fn get_hash(path: impl AsRef<Path>) -> io::Result<String> {
-    let mut reader = File::open(path)?;
+    /// 16 kib buffer (see hasher docs)
+    const MIN_BUFFER_SIZE: usize = 0x4000;
+
     let mut hasher = Hasher::new();
-    io::copy(&mut reader, &mut hasher)?;
+    let mut buf = [0u8; MIN_BUFFER_SIZE];
+
+    // Unclear whether or not a buffered reader is necessary
+    let mut reader =
+        File::open(path).map(|file| BufReader::with_capacity(MIN_BUFFER_SIZE * 20, file))?;
+
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(len) => {
+                hasher.update(&buf[..len]);
+            }
+
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(hasher.finalize().to_string())
 }
 
