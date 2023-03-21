@@ -4,6 +4,7 @@ use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, BufReader, Read},
+    iter,
     path::{Path, PathBuf},
 };
 
@@ -95,14 +96,19 @@ impl Args {
         if atty::is(atty::Stream::Stdin) {
             Either::Left(paths_from_args)
         } else {
-            // todo!("This won't work yet");
-
-
-
-            let paths_from_stdin = io::stdin().lines().filter_map(|line| {
-                let candidate = line.ok()?;
-                Path::is_file(candidate.as_ref()).then(|| candidate.into())
+            let paths_from_stdin = io::stdin().lines().filter_map(|s| s.ok()).flat_map(|s| {
+                // If we're looking at a glob, we actually want all associated paths
+                if s.contains('*') {
+                    let matches = globwalk::glob(s).into_iter().flatten().filter_map(|entry| {
+                        let entry = entry.ok()?;
+                        Some(entry.into_path())
+                    });
+                    Either::Left(matches)
+                } else {
+                    Either::Right(iter::once(PathBuf::from(s)))
+                }
             });
+
             Either::Right(paths_from_args.chain(paths_from_stdin))
         }
     }
