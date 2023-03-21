@@ -83,14 +83,24 @@ impl Args {
     }
 
     fn paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
-        self.paths.iter().filter_map(|x| {
+        let paths_from_args = self.paths.iter().filter_map(|x| {
             let candidate = Path::new(x);
             if candidate.is_file() {
                 Some(candidate.into())
             } else {
                 None
             }
-        })
+        });
+
+        if atty::is(atty::Stream::Stdin) {
+            Either::Left(paths_from_args)
+        } else {
+            let paths_from_stdin = io::stdin().lines().filter_map(|line| {
+                let candidate = line.ok()?;
+                Path::is_file(candidate.as_ref()).then(|| candidate.into())
+            });
+            Either::Right(paths_from_args.chain(paths_from_stdin))
+        }
     }
 
     fn target(&self) -> &str {
@@ -179,7 +189,7 @@ fn main() {
 
 fn run(args: &Args) -> Result<()> {
     if let Some(command) = &args.command {
-        return execute_subcommand(command);
+        return execute_subcommand(command, args.quiet);
     }
 
     let (manifest_parent_path, paths) = match args.try_get_dir() {
@@ -230,6 +240,10 @@ fn run(args: &Args) -> Result<()> {
             let mut reader = File::open(pair.source)?;
             let mut writer = create_target_file(&pair.target, args)?;
             io::copy(&mut reader, &mut writer)?;
+        }
+
+        if !args.quiet {
+            println!("{}", pair.source.display());
         }
     }
 
@@ -304,7 +318,7 @@ fn create_target_file(path: &Path, args: &Args) -> io::Result<File> {
     }
 }
 
-fn execute_subcommand(command: &Command) -> Result<()> {
+fn execute_subcommand(command: &Command, quiet: bool) -> Result<()> {
     use owo_colors::OwoColorize;
 
     match command {
@@ -319,7 +333,7 @@ fn execute_subcommand(command: &Command) -> Result<()> {
                 if let Some(action) = manifest.action {
                     match action {
                         Action::Check => {
-                            if !check_manifest_files(&path, &manifest)? {
+                            if !check_manifest_files(&path, &manifest, quiet)? {
                                 std::process::exit(1);
                             } else {
                                 println!("{}", "Ok".green());
@@ -351,7 +365,7 @@ fn execute_subcommand(command: &Command) -> Result<()> {
 
         Command::Check { path } => {
             let path = get_root_path(path);
-            check_files(&path, get_manifest_paths(&path)?)
+            check_files(&path, get_manifest_paths(&path)?, quiet)
         }
     }
 }
@@ -397,7 +411,11 @@ fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-fn check_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+fn check_files(
+    root: &Path,
+    manifest_paths: impl IntoIterator<Item = PathBuf>,
+    quiet: bool,
+) -> Result<()> {
     use owo_colors::OwoColorize;
 
     let mut has_files = false;
@@ -406,7 +424,7 @@ fn check_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -
         let manifest = load_manifest(&manifest_path)?;
         has_files = true;
 
-        if !check_manifest_files(root, &manifest)? {
+        if !check_manifest_files(root, &manifest, quiet)? {
             std::process::exit(1);
         } else {
             println!("{}", "Ok".green());
@@ -424,7 +442,7 @@ fn check_files(root: &Path, manifest_paths: impl IntoIterator<Item = PathBuf>) -
 /// Checks manifest files.
 ///
 /// Boolean result indicates success for all files in manifest.
-fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bool> {
+fn check_manifest_files(root: &Path, manifest: &ActionManifest, quiet: bool) -> io::Result<bool> {
     for (file_name, hash) in &manifest.items {
         let reconstructed_path = root.join(file_name);
         if !reconstructed_path.exists() {
@@ -440,6 +458,10 @@ fn check_manifest_files(root: &Path, manifest: &ActionManifest) -> io::Result<bo
             let file_name = file_name.display();
             eprintln!("{mismatch} {file_name}");
             return Ok(false);
+        }
+
+        if !quiet {
+            println!("{}", file_name.display());
         }
     }
 

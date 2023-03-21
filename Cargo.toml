@@ -1,11 +1,12 @@
 [package]
 name = "pack"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+atty = "0.2.14"
 blake3 = "1.3.3"
 bumpalo = "3.12.0"
 clap = { version = "4.1.1", features = ["derive"] }
