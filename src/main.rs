@@ -95,6 +95,10 @@ impl Args {
         if atty::is(atty::Stream::Stdin) {
             Either::Left(paths_from_args)
         } else {
+            // todo!("This won't work yet");
+
+
+
             let paths_from_stdin = io::stdin().lines().filter_map(|line| {
                 let candidate = line.ok()?;
                 Path::is_file(candidate.as_ref()).then(|| candidate.into())
@@ -408,7 +412,9 @@ fn remove_or_warn(path: impl AsRef<Path>) -> io::Result<()> {
         return Ok(());
     }
 
-    fs::remove_file(path)
+    fs::remove_file(path)?;
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn check_files(
